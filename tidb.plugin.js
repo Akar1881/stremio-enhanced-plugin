@@ -574,7 +574,7 @@
 
 					for (const segmentType of SEGMENT_TYPES) {
 						if (json[segmentType] && json[segmentType].length > 0) {
-							this.segments[segmentType] = json[segmentType].map((segment) => ({
+							this.segments[segmentType] = json[segmentType].filter((segment) => segment.start_ms > 0 || segment.end_ms > 0).map((segment) => ({
 								start: segment.start_ms == null ? 0 : segment.start_ms / 1000,
 								end: segment.end_ms == null ? null : segment.end_ms / 1000
 							}));
