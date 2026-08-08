@@ -2,7 +2,7 @@
  * @name TheIntroDB
  * @description Skip intros, recaps, credits, and previews in TV shows and movies in Stremio Enhanced using TheIntroDB API
  * @updateUrl https://raw.githubusercontent.com/TheIntroDB/stremio-enhanced-plugin/refs/heads/main/tidb.plugin.js
- * @version 1.1.2
+ * @version 1.1.3
  * @author TheIntroDB
  */
 /* jshint esversion: 11, browser: true, devel: true */
@@ -11,7 +11,7 @@
 (function() {
 	"use strict";
 
-	const PLUGIN_VERSION = "1.1.1";
+	const PLUGIN_VERSION = "1.1.3";
 	const SERVER_URL = "https://api.theintrodb.org/v3";
 	const ACTIVE_BTN_ID = "tidb-active-btn";
 	const MAX_RETRIES = 3;
@@ -226,6 +226,8 @@
 			this.skipButtonTimeout = null;
 			this.overlayObserver = null;
 			this.userApiKey = "";
+			this.apiKeyValidation = null;
+			this._validatingApiKey = false;
 			this.analyticsEnabled = true;
 			this.theme = "glass";
 			this.segmentButtonVisibility = Object.fromEntries(SEGMENT_TYPES.map((type) => [type, true]));
@@ -334,6 +336,131 @@
 			this.segmentButtonVisibility = visibility;
 		}
 
+		async validateApiKey(force = false) {
+			if (!this.userApiKey) {
+				this.apiKeyValidation = { key: "", valid: false, stats: null, reason: "empty" };
+				return this.apiKeyValidation;
+			}
+
+			if (!force && this.apiKeyValidation && this.apiKeyValidation.key === this.userApiKey) {
+				return this.apiKeyValidation;
+			}
+
+			try {
+				const res = await fetch(`${SERVER_URL}/user/stats`, {
+					headers: this.getTidbHeaders()
+				});
+
+				let stats = null;
+				let reason = "";
+				if (res.status === 200) {
+					try {
+						stats = await res.json();
+					} catch (err) {
+						stats = null;
+					}
+					reason = stats && stats.error ? String(stats.error) : "";
+				} else {
+					try {
+						const body = await res.json();
+						reason = body && body.error ? String(body.error) : `HTTP ${res.status}`;
+					} catch (err) {
+						reason = `HTTP ${res.status}`;
+					}
+				}
+
+				const validation = {
+					key: this.userApiKey,
+					valid: res.status === 200 && !reason,
+					stats: res.status === 200 && !reason ? stats : null,
+					reason
+				};
+				this.apiKeyValidation = validation;
+				return validation;
+			} catch (err) {
+				console.warn("[TheIntroDB] Could not validate API key:", err);
+				const validation = {
+					key: this.userApiKey,
+					valid: false,
+					stats: null,
+					reason: "network"
+				};
+				this.apiKeyValidation = validation;
+				return validation;
+			}
+		}
+
+		async maybeValidateApiKey() {
+			if (this._validatingApiKey) return;
+			this._validatingApiKey = true;
+
+			try {
+				if (typeof StremioEnhancedAPI !== "undefined") {
+					try {
+						const storedKey = normalizeApiKey(await StremioEnhancedAPI.getSetting(TIDB_API_KEY_SETTING));
+						if (typeof storedKey === "string" && storedKey !== this.userApiKey) {
+							this.userApiKey = storedKey;
+						}
+					} catch (err) {
+						/* settings API unavailable — use last known key */
+					}
+				}
+
+				if (!this.userApiKey) return;
+				if (this.apiKeyValidation && this.apiKeyValidation.key === this.userApiKey) return;
+
+				const result = await this.validateApiKey();
+				this.reportApiKeyValidation(result);
+			} finally {
+				this._validatingApiKey = false;
+			}
+		}
+
+		reportApiKeyValidation(result) {
+			if (!result) return;
+
+			if (result.valid) {
+				const stats = result.stats || {};
+				console.log(`[TheIntroDB] API key valid — ${stats.accepted || 0} accepted, ${stats.pending || 0} pending, ${stats.rejected || 0} rejected`);
+				return;
+			}
+
+			if (result.reason === "empty") {
+				console.debug("[TheIntroDB] No API key configured (anonymous mode)");
+				return;
+			}
+
+			console.warn(`[TheIntroDB] API key invalid: ${result.reason}`);
+			this.showApiKeyStatusPill(`TheIntroDB API key invalid — ${result.reason}`);
+		}
+
+		showApiKeyStatusPill(message) {
+			try {
+				if (document.getElementById("tidb-api-key-pill")) return;
+				const pill = document.createElement("div");
+				pill.id = "tidb-api-key-pill";
+				pill.textContent = `⚠ ${message}`;
+				Object.assign(pill.style, {
+					position: "fixed",
+					top: "16px",
+					right: "16px",
+					zIndex: "2147483647",
+					padding: "10px 14px",
+					borderRadius: "8px",
+					background: "rgba(220, 38, 38, 0.92)",
+					color: "#ffffff",
+					font: "13px/1.4 -apple-system, 'Segoe UI', Roboto, sans-serif",
+					boxShadow: "0 2px 12px rgba(0, 0, 0, 0.35)",
+					pointerEvents: "none",
+					maxWidth: "340px"
+				});
+				document.body.appendChild(pill);
+				setTimeout(() => pill.remove(), 6000);
+			} catch (err) {
+				console.warn("[TheIntroDB] Failed to show API key status:", err);
+			}
+		}
+
 		track(eventName, props) {
 			if (!this.analyticsEnabled) return;
 			initAnalyticsOnce();
@@ -388,6 +515,8 @@
 		async checkPlaybackChange() {
 			if (this._checkingPlayback) return;
 			this._checkingPlayback = true;
+
+			this.maybeValidateApiKey();
 
 			const video = document.querySelector("video");
 			try {
