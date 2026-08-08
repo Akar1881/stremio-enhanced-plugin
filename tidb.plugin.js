@@ -582,26 +582,16 @@
 			if (!modal || modal.dataset.tidbEnhanced === "1") return;
 			modal.dataset.tidbEnhanced = "1";
 
-			const section = modal.querySelector('[class*="section-container"]');
-			if (!section) return;
-
-			const card = document.createElement("div");
-			card.style.cssText = "flex-shrink:0;display:flex;flex-direction:column;gap:10px;margin:0 0 14px;padding:16px 18px;border-radius:12px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.09);";
-
-			const heading = document.createElement("div");
-			heading.style.cssText = "font-size:1.1em;line-height:1.4;";
-			heading.textContent = "Test API Key";
-
-			const description = document.createElement("div");
-			description.style.cssText = "font-size:0.85em;color:#a0a0a0;line-height:1.4;";
-			description.textContent = "Check the configured key against the TheIntroDB API.";
+			const input = modal.querySelector('[data-key="tidb_api_key"]');
+			const row = input && input.closest('[class*="option-"]');
+			if (!row) return;
 
 			const button = document.createElement("div");
 			button.tabIndex = 0;
 			button.className = "tidb-test-api-key-btn";
-			button.style.cssText = "align-self:flex-start;margin-top:8px;padding:10px 22px;border-radius:20px;background:rgba(255,255,255,0.10);cursor:pointer;user-select:none;";
+			button.style.cssText = "align-self:flex-start;margin-top:12px;padding:8px 20px;border-radius:18px;background:rgba(255,255,255,0.10);cursor:pointer;user-select:none;";
 			const buttonLabel = document.createElement("div");
-			buttonLabel.style.cssText = "font-size:0.95em;line-height:1;";
+			buttonLabel.style.cssText = "font-size:0.9em;line-height:1;";
 			buttonLabel.textContent = "Test API Key";
 			button.appendChild(buttonLabel);
 
@@ -609,7 +599,6 @@
 			status.className = "tidb-api-key-status";
 
 			button.addEventListener("click", async () => {
-				const input = modal.querySelector('[data-key="tidb_api_key"]');
 				const rawKey = input ? input.value : "";
 				status.textContent = "Checking...";
 				status.className = "tidb-api-key-status";
@@ -625,17 +614,7 @@
 				}
 			});
 
-			card.append(heading, description, button, status);
-
-			// Pin the card outside the scrollable settings list so it is always
-			// reachable: between the settings body and the Close button row.
-			const content = modal.querySelector('[class*="modal-dialog-content"]');
-			const buttons = modal.querySelector('[class*="buttons-container"]');
-			if (content && buttons) {
-				content.insertBefore(card, buttons);
-			} else {
-				section.appendChild(card);
-			}
+			row.append(button, status);
 		}
 
 		track(eventName, props) {
