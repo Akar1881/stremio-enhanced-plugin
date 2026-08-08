@@ -257,6 +257,8 @@
 			});
 			this._checkTimer = setInterval(() => this.checkPlaybackChange(), 2000);
 			this.checkPlaybackChange();
+			this.injectSettingsStyles();
+			this.injectSettingsModalUi();
 		}
 
 		async initializeSettings() {
@@ -309,6 +311,18 @@
 
 				await StremioEnhancedAPI.registerSettings(schema);
 				window.__tidbSettingsRegistered = true;
+
+				if (typeof StremioEnhancedAPI.onSettingsSaved === "function") {
+					StremioEnhancedAPI.onSettingsSaved((newSettings) => {
+						const newKey = normalizeApiKey(newSettings && newSettings[TIDB_API_KEY_SETTING]);
+						this.userApiKey = newKey;
+						this.apiKeyValidation = null;
+						if (!newKey) return;
+						this.validateApiKey().then((result) => {
+							this.reportApiKeyValidation(result, true);
+						});
+					});
+				}
 			} catch (err) {
 				const message = err && err.message ? String(err.message) : "";
 				if (message.includes("settings schema registered")) {
@@ -336,19 +350,21 @@
 			this.segmentButtonVisibility = visibility;
 		}
 
-		async validateApiKey(force = false) {
-			if (!this.userApiKey) {
+		async validateApiKey(force = false, explicitKey = null) {
+			const apiKey = explicitKey == null ? this.userApiKey : normalizeApiKey(explicitKey);
+
+			if (!apiKey) {
 				this.apiKeyValidation = { key: "", valid: false, stats: null, reason: "empty" };
 				return this.apiKeyValidation;
 			}
 
-			if (!force && this.apiKeyValidation && this.apiKeyValidation.key === this.userApiKey) {
+			if (!force && this.apiKeyValidation && this.apiKeyValidation.key === apiKey) {
 				return this.apiKeyValidation;
 			}
 
 			try {
 				const res = await fetch(`${SERVER_URL}/user/stats`, {
-					headers: this.getTidbHeaders()
+					headers: this.getTidbHeaders(apiKey)
 				});
 
 				let stats = null;
@@ -370,22 +386,22 @@
 				}
 
 				const validation = {
-					key: this.userApiKey,
+					key: apiKey,
 					valid: res.status === 200 && !reason,
 					stats: res.status === 200 && !reason ? stats : null,
 					reason
 				};
-				this.apiKeyValidation = validation;
+				if (explicitKey == null) this.apiKeyValidation = validation;
 				return validation;
 			} catch (err) {
 				console.warn("[TheIntroDB] Could not validate API key:", err);
 				const validation = {
-					key: this.userApiKey,
+					key: apiKey,
 					valid: false,
 					stats: null,
 					reason: "network"
 				};
-				this.apiKeyValidation = validation;
+				if (explicitKey == null) this.apiKeyValidation = validation;
 				return validation;
 			}
 		}
@@ -416,12 +432,16 @@
 			}
 		}
 
-		reportApiKeyValidation(result) {
+		reportApiKeyValidation(result, showPillForValid = false) {
 			if (!result) return;
 
 			if (result.valid) {
 				const stats = result.stats || {};
-				console.log(`[TheIntroDB] API key valid — ${stats.accepted || 0} accepted, ${stats.pending || 0} pending, ${stats.rejected || 0} rejected`);
+				const summary = `${stats.accepted || 0} accepted, ${stats.pending || 0} pending, ${stats.rejected || 0} rejected`;
+				console.log(`[TheIntroDB] API key valid — ${summary}`);
+				if (showPillForValid) {
+					this.showApiKeyStatusPill(`TheIntroDB API key valid — ${summary}`, true);
+				}
 				return;
 			}
 
@@ -431,15 +451,15 @@
 			}
 
 			console.warn(`[TheIntroDB] API key invalid: ${result.reason}`);
-			this.showApiKeyStatusPill(`TheIntroDB API key invalid — ${result.reason}`);
+			this.showApiKeyStatusPill(`TheIntroDB API key invalid — ${result.reason}`, false);
 		}
 
-		showApiKeyStatusPill(message) {
+		showApiKeyStatusPill(message, valid = false) {
 			try {
 				if (document.getElementById("tidb-api-key-pill")) return;
 				const pill = document.createElement("div");
 				pill.id = "tidb-api-key-pill";
-				pill.textContent = `⚠ ${message}`;
+				pill.textContent = `${valid ? "✓" : "⚠"} ${message}`;
 				Object.assign(pill.style, {
 					position: "fixed",
 					top: "16px",
@@ -447,7 +467,7 @@
 					zIndex: "2147483647",
 					padding: "10px 14px",
 					borderRadius: "8px",
-					background: "rgba(220, 38, 38, 0.92)",
+					background: valid ? "rgba(22, 163, 74, 0.92)" : "rgba(220, 38, 38, 0.92)",
 					color: "#ffffff",
 					font: "13px/1.4 -apple-system, 'Segoe UI', Roboto, sans-serif",
 					boxShadow: "0 2px 12px rgba(0, 0, 0, 0.35)",
@@ -461,6 +481,121 @@
 			}
 		}
 
+		injectSettingsStyles() {
+			if (document.getElementById("tidb-settings-css")) return;
+			const style = document.createElement("style");
+			style.id = "tidb-settings-css";
+			style.textContent = `
+				/* Stack plugin settings vertically as cards */
+				#tidbpluginjs-settings-modal [class*="option-"] {
+					display: flex !important;
+					flex-direction: column !important;
+					align-items: stretch !important;
+					justify-content: flex-start !important;
+					gap: 10px !important;
+					margin-bottom: 14px !important;
+					padding: 16px 18px !important;
+					border-radius: 12px !important;
+					background: rgba(255, 255, 255, 0.05) !important;
+					border: 1px solid rgba(255, 255, 255, 0.09) !important;
+				}
+				#tidbpluginjs-settings-modal [class*="option-"] [class*="heading-"],
+				#tidbpluginjs-settings-modal [class*="option-"] [class*="content-"] {
+					width: 100% !important;
+					max-width: none !important;
+					flex: none !important;
+					padding-right: 0 !important;
+				}
+				#tidbpluginjs-settings-modal [class*="option-"] input,
+				#tidbpluginjs-settings-modal [class*="option-"] select {
+					width: 100% !important;
+					max-width: none !important;
+				}
+				/* Responsive modal width */
+				#tidbpluginjs-settings-modal div[style*="max-width: 800px"] {
+					width: min(92vw, 720px) !important;
+					max-width: 92vw !important;
+				}
+				/* Taller scroll area for stacked cards */
+				#tidbpluginjs-settings-modal [class*="section-container"] {
+					max-height: 65vh !important;
+				}
+				/* Test API key card status line */
+				.tidb-api-key-status {
+					font-size: 0.9em;
+					line-height: 1.4;
+					margin-top: 4px;
+					white-space: normal;
+				}
+				.tidb-api-key-status.ok { color: #4ade80; }
+				.tidb-api-key-status.err { color: #f87171; }
+			`;
+			document.head.appendChild(style);
+		}
+
+		injectSettingsModalUi() {
+			if (this._settingsModalObserver) return;
+			this._settingsModalObserver = new MutationObserver(() => this.enhanceSettingsModal());
+			this._settingsModalObserver.observe(document.body, {
+				childList: true,
+				subtree: true
+			});
+		}
+
+		enhanceSettingsModal() {
+			// The app builds the modal id from the plugin file name:
+			// "tidb.plugin.js" -> alphanumerics only -> "tidbpluginjs-settings-modal"
+			const modal = document.getElementById("tidbpluginjs-settings-modal");
+			if (!modal || modal.dataset.tidbEnhanced === "1") return;
+			modal.dataset.tidbEnhanced = "1";
+
+			const section = modal.querySelector('[class*="section-container"]');
+			if (!section) return;
+
+			const card = document.createElement("div");
+			card.style.cssText = "display:flex;flex-direction:column;gap:10px;margin-top:14px;padding:16px 18px;border-radius:12px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.09);";
+
+			const heading = document.createElement("div");
+			heading.style.cssText = "font-size:1.1em;line-height:1.4;";
+			heading.textContent = "Test API Key";
+
+			const description = document.createElement("div");
+			description.style.cssText = "font-size:0.85em;color:#a0a0a0;line-height:1.4;";
+			description.textContent = "Check the configured key against the TheIntroDB API.";
+
+			const button = document.createElement("div");
+			button.tabIndex = 0;
+			button.className = "tidb-test-api-key-btn";
+			button.style.cssText = "align-self:flex-start;margin-top:8px;padding:10px 22px;border-radius:20px;background:rgba(255,255,255,0.10);cursor:pointer;user-select:none;";
+			const buttonLabel = document.createElement("div");
+			buttonLabel.style.cssText = "font-size:0.95em;line-height:1;";
+			buttonLabel.textContent = "Test API Key";
+			button.appendChild(buttonLabel);
+
+			const status = document.createElement("div");
+			status.className = "tidb-api-key-status";
+
+			button.addEventListener("click", async () => {
+				const input = modal.querySelector('[data-key="tidb_api_key"]');
+				const rawKey = input ? input.value : "";
+				status.textContent = "Checking...";
+				status.className = "tidb-api-key-status";
+				const result = await this.validateApiKey(false, rawKey);
+				if (result.valid) {
+					const stats = result.stats || {};
+					status.textContent = `Valid — ${stats.accepted || 0} accepted, ${stats.pending || 0} pending, ${stats.rejected || 0} rejected`;
+					status.className = "tidb-api-key-status ok";
+				} else {
+					const reason = result.reason === "empty" ? "No API key entered" : result.reason;
+					status.textContent = `Invalid — ${reason}`;
+					status.className = "tidb-api-key-status err";
+				}
+			});
+
+			card.append(heading, description, button, status);
+			section.appendChild(card);
+		}
+
 		track(eventName, props) {
 			if (!this.analyticsEnabled) return;
 			initAnalyticsOnce();
@@ -471,13 +606,13 @@
 			return this.segmentButtonVisibility[segmentType] !== false;
 		}
 
-		getTidbHeaders() {
+		getTidbHeaders(apiKey = this.userApiKey) {
 			const headers = {
 				"User-Agent": TIDB_USER_AGENT
 			};
 
-			if (this.userApiKey) {
-				headers.Authorization = `Bearer ${this.userApiKey}`;
+			if (apiKey) {
+				headers.Authorization = `Bearer ${apiKey}`;
 			}
 
 			return headers;
