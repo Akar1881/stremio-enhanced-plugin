@@ -511,14 +511,47 @@
 					width: 100% !important;
 					max-width: none !important;
 				}
+				/* Toggle rows: keep the toggle on the right of the card */
+				#tidbpluginjs-settings-modal [class*="option-"]:has(.plugin-setting-toggle) {
+					flex-direction: row !important;
+					align-items: center !important;
+					justify-content: space-between !important;
+					gap: 16px !important;
+				}
+				#tidbpluginjs-settings-modal [class*="option-"]:has(.plugin-setting-toggle) [class*="heading-"] {
+					flex: 1 1 auto !important;
+					padding-right: 12px !important;
+				}
+				#tidbpluginjs-settings-modal [class*="option-"]:has(.plugin-setting-toggle) [class*="content-"] {
+					flex: 0 0 auto !important;
+					width: auto !important;
+				}
 				/* Responsive modal width */
 				#tidbpluginjs-settings-modal div[style*="max-width: 800px"] {
 					width: min(92vw, 720px) !important;
 					max-width: 92vw !important;
 				}
-				/* Taller scroll area for stacked cards */
+				/* Scroll chain: min-height 0 lets flex children shrink so the
+				   settings list scrolls instead of overflowing the modal */
+				#tidbpluginjs-settings-modal [class*="modal-dialog-container"],
+				#tidbpluginjs-settings-modal [class*="modal-dialog-content"],
+				#tidbpluginjs-settings-modal [class*="body-container"] {
+					min-height: 0 !important;
+					overflow: hidden !important;
+				}
+				#tidbpluginjs-settings-modal [class*="modal-dialog-container"] {
+					max-height: 85vh !important;
+				}
+				#tidbpluginjs-settings-modal [class*="body-container"] {
+					flex: 1 1 auto !important;
+					display: flex !important;
+					flex-direction: column !important;
+				}
 				#tidbpluginjs-settings-modal [class*="section-container"] {
-					max-height: 65vh !important;
+					overflow-y: auto !important;
+					overflow-x: hidden !important;
+					max-height: 55vh !important;
+					flex: 1 1 auto !important;
 				}
 				/* Test API key card status line */
 				.tidb-api-key-status {
@@ -553,7 +586,7 @@
 			if (!section) return;
 
 			const card = document.createElement("div");
-			card.style.cssText = "display:flex;flex-direction:column;gap:10px;margin-top:14px;padding:16px 18px;border-radius:12px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.09);";
+			card.style.cssText = "flex-shrink:0;display:flex;flex-direction:column;gap:10px;margin:0 0 14px;padding:16px 18px;border-radius:12px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.09);";
 
 			const heading = document.createElement("div");
 			heading.style.cssText = "font-size:1.1em;line-height:1.4;";
@@ -593,7 +626,16 @@
 			});
 
 			card.append(heading, description, button, status);
-			section.appendChild(card);
+
+			// Pin the card outside the scrollable settings list so it is always
+			// reachable: between the settings body and the Close button row.
+			const content = modal.querySelector('[class*="modal-dialog-content"]');
+			const buttons = modal.querySelector('[class*="buttons-container"]');
+			if (content && buttons) {
+				content.insertBefore(card, buttons);
+			} else {
+				section.appendChild(card);
+			}
 		}
 
 		track(eventName, props) {
