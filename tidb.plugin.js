@@ -1,9 +1,8 @@
 /**
- * @name TheIntroDB
- * @description Skip intros, recaps, credits, and previews in TV shows and movies in Stremio Enhanced using TheIntroDB API
- * @updateUrl https://raw.githubusercontent.com/TheIntroDB/stremio-enhanced-plugin/refs/heads/main/tidb.plugin.js
- * @version 1.1.4
- * @author TheIntroDB
+ * @name IntroDB
+ * @description Skip intros, recaps and credits in TV shows and movies in Stremio Enhanced, using the free community introdb.app API (no key required)
+ * @version 2.0.0
+ * @author TheIntroDB (adapted to introdb.app)
  */
 /* jshint esversion: 11, browser: true, devel: true */
 /* global StremioEnhancedAPI */
@@ -11,15 +10,13 @@
 (function() {
 	"use strict";
 
-	const PLUGIN_VERSION = "1.1.4";
-	const SERVER_URL = "https://api.theintrodb.org/v3";
+	const PLUGIN_VERSION = "2.0.0";
+	const SERVER_URL = "https://api.introdb.app";
 	const ACTIVE_BTN_ID = "tidb-active-btn";
 	const MAX_RETRIES = 3;
 	const RETRY_DELAY = 2000;
-	const TIDB_API_KEY_SETTING = "tidb_api_key";
 	const ANALYTICS_SETTING = "anonymous_usage_reporting";
 	const THEME_SETTING = "tidb_theme";
-	const TIDB_USER_AGENT = "TheIntroDB Stremio Enhanced Plugin";
 
 	const THEMES = {
 		default: {
@@ -44,24 +41,30 @@
         }
 	};
 
+	// introdb.app answers with intro, recap, outro and post_credits. The player
+	// draws the end credits as "credits"; post_credits is a scene after them,
+	// which is something to watch rather than something to skip, so it is left
+	// alone. The button ids keep their names so existing settings still apply.
 	const SEGMENT_BUTTON_SETTINGS = {
 		intro: "show_intro_button",
 		recap: "show_recap_button",
-		credits: "show_credits_button",
-		preview: "show_preview_button"
+		credits: "show_credits_button"
 	};
 	const SEGMENT_TYPES = Object.keys(SEGMENT_BUTTON_SETTINGS);
+	const API_SEGMENT_KEY = Object.freeze({
+		intro: "intro",
+		recap: "recap",
+		credits: "outro"
+	});
 	const SEGMENT_LABELS = Object.freeze({
 		intro: "Skip Intro",
 		recap: "Skip Recap",
-		credits: "Skip Credits",
-		preview: "Skip Preview"
+		credits: "Skip Credits"
 	});
 	const SEGMENT_COLORS = Object.freeze({
 		intro: "rgba(255, 217, 0, 0.6)",
 		recap: "rgba(255, 165, 0, 0.6)",
-		credits: "rgba(100, 149, 237, 0.6)",
-		preview: "rgba(144, 238, 144, 0.6)"
+		credits: "rgba(100, 149, 237, 0.6)"
 	});
 	const HIDE_TIMEOUT = 5000;
 
@@ -200,19 +203,27 @@
 		return Object.fromEntries(SEGMENT_TYPES.map((type) => [type, []]));
 	}
 
-	function normalizeApiKey(value) {
-		return typeof value === "string" ? value.trim() : "";
-	}
-
 	function normalizeToggleValue(value) {
 		return value !== false;
 	}
 
-	function getVideoDurationMs(video) {
-		const durationSec = video && typeof video.duration === "number" ? video.duration : NaN;
-		if (!Number.isFinite(durationSec) || durationSec <= 0) return null;
-		const durationMs = Math.round(durationSec * 1000);
-		return durationMs > 0 ? durationMs : null;
+	/**
+	 * One slot of the /segments response, or null if it is absent or unusable.
+	 *
+	 * `start_sec`/`end_sec` come back whole or fractional seconds. A range that
+	 * ends where it starts is a submission with nothing in it, and one that runs
+	 * past the other way round is nonsense — both are dropped rather than drawn
+	 * as a zero-width band on the seek bar.
+	 */
+	function readRange(slot) {
+		if (!slot) return null;
+
+		const start = Number(slot.start_sec);
+		const end = Number(slot.end_sec);
+		if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+		if (start < 0 || end <= start) return null;
+
+		return { start, end };
 	}
 
 	class TheIntroDBPlugin {
@@ -225,9 +236,6 @@
 			this.displayedSegmentType = null;
 			this.skipButtonTimeout = null;
 			this.overlayObserver = null;
-			this.userApiKey = "";
-			this.apiKeyValidation = null;
-			this._validatingApiKey = false;
 			this.analyticsEnabled = true;
 			this.theme = "glass";
 			this.segmentButtonVisibility = Object.fromEntries(SEGMENT_TYPES.map((type) => [type, true]));
@@ -241,7 +249,6 @@
 			this._lastStateContext = null;
 			this._lastStateCheckAt = 0;
 			this._lastVideoSource = null;
-			this._lastFetchedDurationMs = null;
 			this._checkTimer = null;
 			this._observer = null;
 			this.init();
@@ -258,7 +265,6 @@
 			this._checkTimer = setInterval(() => this.checkPlaybackChange(), 2000);
 			this.checkPlaybackChange();
 			this.injectSettingsStyles();
-			this.injectSettingsModalUi();
 		}
 
 		async initializeSettings() {
@@ -272,12 +278,6 @@
 
 			try {
 				const schema = [{
-						key: TIDB_API_KEY_SETTING,
-						type: "input",
-						label: "TIDB API Key",
-						defaultValue: ""
-					},
-					{
 						key: THEME_SETTING,
 						type: "select",
 						label: "Button Theme",
@@ -313,14 +313,8 @@
 				window.__tidbSettingsRegistered = true;
 
 				if (typeof StremioEnhancedAPI.onSettingsSaved === "function") {
-					StremioEnhancedAPI.onSettingsSaved((newSettings) => {
-						const newKey = normalizeApiKey(newSettings && newSettings[TIDB_API_KEY_SETTING]);
-						this.userApiKey = newKey;
-						this.apiKeyValidation = null;
-						if (!newKey) return;
-						this.validateApiKey().then((result) => {
-							this.reportApiKeyValidation(result, true);
-						});
+					StremioEnhancedAPI.onSettingsSaved(() => {
+						this.loadSettings();
 					});
 				}
 			} catch (err) {
@@ -329,7 +323,7 @@
 					window.__tidbSettingsRegistered = true;
 					return;
 				}
-				console.warn("[TheIntroDB] Failed to register settings:", err);
+				console.warn("[IntroDB] Failed to register settings:", err);
 			}
 		}
 
@@ -339,7 +333,6 @@
 			}
 
 			this.theme = (await StremioEnhancedAPI.getSetting(THEME_SETTING)) || "default";
-			this.userApiKey = normalizeApiKey(await StremioEnhancedAPI.getSetting(TIDB_API_KEY_SETTING));
 			this.analyticsEnabled = normalizeToggleValue(await StremioEnhancedAPI.getSetting(ANALYTICS_SETTING));
 			if (this.analyticsEnabled) initAnalyticsOnce();
 
@@ -348,137 +341,6 @@
 				visibility[segmentType] = normalizeToggleValue(await StremioEnhancedAPI.getSetting(settingKey));
 			}
 			this.segmentButtonVisibility = visibility;
-		}
-
-		async validateApiKey(force = false, explicitKey = null) {
-			const apiKey = explicitKey == null ? this.userApiKey : normalizeApiKey(explicitKey);
-
-			if (!apiKey) {
-				this.apiKeyValidation = { key: "", valid: false, stats: null, reason: "empty" };
-				return this.apiKeyValidation;
-			}
-
-			if (!force && this.apiKeyValidation && this.apiKeyValidation.key === apiKey) {
-				return this.apiKeyValidation;
-			}
-
-			try {
-				const res = await fetch(`${SERVER_URL}/user/stats`, {
-					headers: this.getTidbHeaders(apiKey)
-				});
-
-				let stats = null;
-				let reason = "";
-				if (res.status === 200) {
-					try {
-						stats = await res.json();
-					} catch (err) {
-						stats = null;
-					}
-					reason = stats && stats.error ? String(stats.error) : "";
-				} else {
-					try {
-						const body = await res.json();
-						reason = body && body.error ? String(body.error) : `HTTP ${res.status}`;
-					} catch (err) {
-						reason = `HTTP ${res.status}`;
-					}
-				}
-
-				const validation = {
-					key: apiKey,
-					valid: res.status === 200 && !reason,
-					stats: res.status === 200 && !reason ? stats : null,
-					reason
-				};
-				if (explicitKey == null) this.apiKeyValidation = validation;
-				return validation;
-			} catch (err) {
-				console.warn("[TheIntroDB] Could not validate API key:", err);
-				const validation = {
-					key: apiKey,
-					valid: false,
-					stats: null,
-					reason: "network"
-				};
-				if (explicitKey == null) this.apiKeyValidation = validation;
-				return validation;
-			}
-		}
-
-		async maybeValidateApiKey() {
-			if (this._validatingApiKey) return;
-			this._validatingApiKey = true;
-
-			try {
-				if (typeof StremioEnhancedAPI !== "undefined") {
-					try {
-						const storedKey = normalizeApiKey(await StremioEnhancedAPI.getSetting(TIDB_API_KEY_SETTING));
-						if (typeof storedKey === "string" && storedKey !== this.userApiKey) {
-							this.userApiKey = storedKey;
-						}
-					} catch (err) {
-						/* settings API unavailable — use last known key */
-					}
-				}
-
-				if (!this.userApiKey) return;
-				if (this.apiKeyValidation && this.apiKeyValidation.key === this.userApiKey) return;
-
-				const result = await this.validateApiKey();
-				this.reportApiKeyValidation(result);
-			} finally {
-				this._validatingApiKey = false;
-			}
-		}
-
-		reportApiKeyValidation(result, showPillForValid = false) {
-			if (!result) return;
-
-			if (result.valid) {
-				const stats = result.stats || {};
-				const summary = `${stats.accepted || 0} accepted, ${stats.pending || 0} pending, ${stats.rejected || 0} rejected`;
-				console.log(`[TheIntroDB] API key valid — ${summary}`);
-				if (showPillForValid) {
-					this.showApiKeyStatusPill(`TheIntroDB API key valid — ${summary}`, true);
-				}
-				return;
-			}
-
-			if (result.reason === "empty") {
-				console.debug("[TheIntroDB] No API key configured (anonymous mode)");
-				return;
-			}
-
-			console.warn(`[TheIntroDB] API key invalid: ${result.reason}`);
-			this.showApiKeyStatusPill(`TheIntroDB API key invalid — ${result.reason}`, false);
-		}
-
-		showApiKeyStatusPill(message, valid = false) {
-			try {
-				if (document.getElementById("tidb-api-key-pill")) return;
-				const pill = document.createElement("div");
-				pill.id = "tidb-api-key-pill";
-				pill.textContent = `${valid ? "✓" : "⚠"} ${message}`;
-				Object.assign(pill.style, {
-					position: "fixed",
-					top: "16px",
-					right: "16px",
-					zIndex: "2147483647",
-					padding: "10px 14px",
-					borderRadius: "8px",
-					background: valid ? "rgba(22, 163, 74, 0.92)" : "rgba(220, 38, 38, 0.92)",
-					color: "#ffffff",
-					font: "13px/1.4 -apple-system, 'Segoe UI', Roboto, sans-serif",
-					boxShadow: "0 2px 12px rgba(0, 0, 0, 0.35)",
-					pointerEvents: "none",
-					maxWidth: "340px"
-				});
-				document.body.appendChild(pill);
-				setTimeout(() => pill.remove(), 6000);
-			} catch (err) {
-				console.warn("[TheIntroDB] Failed to show API key status:", err);
-			}
 		}
 
 		injectSettingsStyles() {
@@ -553,68 +415,8 @@
 					max-height: 55vh !important;
 					flex: 1 1 auto !important;
 				}
-				/* Test API key card status line */
-				.tidb-api-key-status {
-					font-size: 0.9em;
-					line-height: 1.4;
-					margin-top: 4px;
-					white-space: normal;
-				}
-				.tidb-api-key-status.ok { color: #4ade80; }
-				.tidb-api-key-status.err { color: #f87171; }
 			`;
 			document.head.appendChild(style);
-		}
-
-		injectSettingsModalUi() {
-			if (this._settingsModalObserver) return;
-			this._settingsModalObserver = new MutationObserver(() => this.enhanceSettingsModal());
-			this._settingsModalObserver.observe(document.body, {
-				childList: true,
-				subtree: true
-			});
-		}
-
-		enhanceSettingsModal() {
-			// The app builds the modal id from the plugin file name:
-			// "tidb.plugin.js" -> alphanumerics only -> "tidbpluginjs-settings-modal"
-			const modal = document.getElementById("tidbpluginjs-settings-modal");
-			if (!modal || modal.dataset.tidbEnhanced === "1") return;
-			modal.dataset.tidbEnhanced = "1";
-
-			const input = modal.querySelector('[data-key="tidb_api_key"]');
-			const row = input && input.closest('[class*="option-"]');
-			if (!row) return;
-
-			const button = document.createElement("div");
-			button.tabIndex = 0;
-			button.className = "tidb-test-api-key-btn";
-			button.style.cssText = "align-self:flex-start;margin-top:12px;padding:8px 20px;border-radius:18px;background:rgba(255,255,255,0.10);cursor:pointer;user-select:none;";
-			const buttonLabel = document.createElement("div");
-			buttonLabel.style.cssText = "font-size:0.9em;line-height:1;";
-			buttonLabel.textContent = "Test API Key";
-			button.appendChild(buttonLabel);
-
-			const status = document.createElement("div");
-			status.className = "tidb-api-key-status";
-
-			button.addEventListener("click", async () => {
-				const rawKey = input ? input.value : "";
-				status.textContent = "Checking...";
-				status.className = "tidb-api-key-status";
-				const result = await this.validateApiKey(false, rawKey);
-				if (result.valid) {
-					const stats = result.stats || {};
-					status.textContent = `Valid — ${stats.accepted || 0} accepted, ${stats.pending || 0} pending, ${stats.rejected || 0} rejected`;
-					status.className = "tidb-api-key-status ok";
-				} else {
-					const reason = result.reason === "empty" ? "No API key entered" : result.reason;
-					status.textContent = `Invalid — ${reason}`;
-					status.className = "tidb-api-key-status err";
-				}
-			});
-
-			row.append(button, status);
 		}
 
 		track(eventName, props) {
@@ -625,18 +427,6 @@
 
 		isSegmentButtonEnabled(segmentType) {
 			return this.segmentButtonVisibility[segmentType] !== false;
-		}
-
-		getTidbHeaders(apiKey = this.userApiKey) {
-			const headers = {
-				"User-Agent": TIDB_USER_AGENT
-			};
-
-			if (apiKey) {
-				headers.Authorization = `Bearer ${apiKey}`;
-			}
-
-			return headers;
 		}
 
 		getVideoSource(video) {
@@ -672,8 +462,6 @@
 			if (this._checkingPlayback) return;
 			this._checkingPlayback = true;
 
-			this.maybeValidateApiKey();
-
 			const video = document.querySelector("video");
 			try {
 				if (!video) return;
@@ -691,10 +479,6 @@
 
 				const episodeChanged = nextEpisodeId !== this.episodeId;
 				if (!episodeChanged && !videoChanged) {
-					const durationMs = getVideoDurationMs(video);
-					if (durationMs != null && durationMs !== this._lastFetchedDurationMs) {
-						await this.fetchData();
-					}
 					return;
 				}
 				if (this.video || this.episodeId) this.cleanup();
@@ -710,7 +494,7 @@
 				await this.settingsReady;
 				await this.loadSettings();
 
-				console.log(`[TheIntroDB] \nEpisode ID: ${this.episodeId}, \nTitle: ${this.title || "Unknown Title"}`);
+				console.log(`[IntroDB] \nEpisode ID: ${this.episodeId}, \nTitle: ${this.title || "Unknown Title"}`);
 				await this.fetchData();
 			} finally {
 				this._checkingPlayback = false;
@@ -808,67 +592,55 @@
 
 			const parts = String(episodeId).split(":");
 			const id = parts[0];
-			const season = parts.length >= 3 ? parts[1] : null;
-			const episode = parts.length >= 3 ? parts[2] : null;
 			const isTvShow = parts.length >= 3;
+
+			// introdb.app is keyed on an IMDb id. Anything else — a bare TMDB id,
+			// say — has no row there, so there is nothing to ask for.
+			if (!id.startsWith("tt")) {
+				this.segments = emptySegments();
+				console.log(`[IntroDB] "${id}" is not an IMDb id; introdb.app has no data for it`);
+				return null;
+			}
+
+			const queryParams = new URLSearchParams({ imdb_id: id });
+			if (isTvShow) {
+				queryParams.set("season", parts[1]);
+				queryParams.set("episode", parts[2]);
+			} else {
+				queryParams.set("is_movie", "true");
+			}
+
 			for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-				console.log(`[TheIntroDB] Fetching /media for episode ${episodeId} (attempt ${attempt})`);
+				console.log(`[IntroDB] Fetching /segments for ${episodeId} (attempt ${attempt})`);
 
 				try {
-					const isImdb = id.startsWith("tt");
-					const queryParams = new URLSearchParams();
-
-					if (isImdb) {
-						queryParams.set("imdb_id", id);
-					} else {
-						queryParams.set("tmdb_id", id);
-					}
-
-					if (isTvShow) {
-						queryParams.set("season", season);
-						queryParams.set("episode", episode);
-					}
-
-					const durationMs = getVideoDurationMs(video);
-					if (durationMs != null) queryParams.set("duration_ms", String(durationMs));
-					this._lastFetchedDurationMs = durationMs;
-
-					const res = await fetch(`${SERVER_URL}/media?${queryParams}`, {
-						headers: this.getTidbHeaders()
-					});
-
-					if (res.status === 204) {
-						this.segments = emptySegments();
-						console.log(`[TheIntroDB] No skip data for episode ${episodeId} (${res.status})`);
-						return null;
-					}
+					const res = await fetch(`${SERVER_URL}/segments?${queryParams}`);
 
 					if (res.status === 404) {
 						this.segments = emptySegments();
-						console.warn(`[TheIntroDB] No data found for episode ${episodeId}`);
+						console.log(`[IntroDB] No skip data for ${episodeId} (${res.status})`);
 						return null;
 					}
 
 					if (!res.ok) {
-						console.warn(`[TheIntroDB] Unexpected response for ${episodeId}: ${res.status}`);
+						console.warn(`[IntroDB] Unexpected response for ${episodeId}: ${res.status}`);
 						return null;
 					}
 
 					const json = await res.json();
 					this.segments = emptySegments();
 
+					// Each slot is a single range rather than a list, but the rest
+					// of the player works in lists of them, so it is wrapped as one.
 					for (const segmentType of SEGMENT_TYPES) {
-						if (json[segmentType] && json[segmentType].length > 0) {
-							this.segments[segmentType] = json[segmentType].filter((segment) => segment.start_ms > 0 || segment.end_ms > 0).map((segment) => ({
-								start: segment.start_ms == null ? 0 : segment.start_ms / 1000,
-								end: segment.end_ms == null ? null : segment.end_ms / 1000
-							}));
-							console.log(`[TheIntroDB] Loaded ${this.segments[segmentType].length} ${segmentType} segments`);
-						}
+						const range = readRange(json[API_SEGMENT_KEY[segmentType]]);
+						if (!range) continue;
+						this.segments[segmentType] = [range];
+						console.log(`[IntroDB] Loaded ${segmentType} segment ${range.start}s–${range.end}s`);
 					}
 
 					if (Object.values(this.segments).flat().length === 0) {
-						console.log(`[TheIntroDB] No segment data found for episode ${episodeId}`);
+						console.log(`[IntroDB] No segment data found for ${episodeId}`);
 					}
 
 					this.waitAndHighlight();
@@ -881,12 +653,11 @@
 						has_intro: this.segments.intro && this.segments.intro.length > 0,
 						has_recap: this.segments.recap && this.segments.recap.length > 0,
 						has_credits: this.segments.credits && this.segments.credits.length > 0,
-						has_preview: this.segments.preview && this.segments.preview.length > 0,
 						total: Object.values(this.segments).reduce((acc, list) => acc + (list ? list.length : 0), 0)
 					});
 					return null;
 				} catch (err) {
-					console.error(`[TheIntroDB] Error fetching media for ${episodeId}:`, err);
+					console.error(`[IntroDB] Error fetching segments for ${episodeId}:`, err);
 
 					if (attempt < MAX_RETRIES) {
 						await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY));
@@ -1089,7 +860,7 @@
 				});
 				if (this.video) {
 					this.video.currentTime = segment.end;
-					console.log(`[TheIntroDB] Skipping ${segmentType}: targetTime=${segment.end}`);
+					console.log(`[IntroDB] Skipping ${segmentType}: targetTime=${segment.end}`);
 				}
 				skipBtn.remove();
 				this.displayedSegmentType = null;
@@ -1107,7 +878,7 @@
 		}
 
 		cleanup() {
-			console.log("[TheIntroDB] Cleaning up previous media...");
+			console.log("[IntroDB] Cleaning up previous media...");
 
 			if (this.video) {
 				if (this.onTimeUpdate) this.video.removeEventListener("timeupdate", this.onTimeUpdate);
@@ -1132,8 +903,7 @@
 				displayedSegmentType: null,
 				onTimeUpdate: null,
 				onSeekedHandler: null,
-				onMouseMoveHandler: null,
-				_lastFetchedDurationMs: null
+				onMouseMoveHandler: null
 			});
 		}
 
