@@ -13,7 +13,7 @@ No API key is needed.
 ## Install
 
 1. Open the JavaScript plugin manager in Stremio Enhanced.
-2. Add or import [`skip-intro.js`](skip-intro.js) as a plugin and enable it.
+2. Add or import [`introdb.plugin.js`](introdb.plugin.js) as a plugin and enable it.
 3. Start a movie or TV episode. When matching segment data exists, its ranges appear on the seek bar and the relevant skip button appears during playback.
 
 ## Settings
